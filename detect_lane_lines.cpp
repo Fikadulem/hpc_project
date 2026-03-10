@@ -2,7 +2,7 @@
 // Detect (most) white road-marking lines in an image, smooth/merge them, and export as GeoJSON (pixel coordinates).
 //
 // Build:
-//   g++ -std=c++17 main.cpp -o white_lines `pkg-config --cflags --libs opencv4`
+//   g++ -std=c++17 detect_lane_lines.cpp -o white_lines `pkg-config --cflags --libs opencv4`
 //
 // Run:
 //   ./white_lines road.png
