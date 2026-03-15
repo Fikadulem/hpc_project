@@ -196,7 +196,7 @@ int main() {
     const int CPU_CANNY_LOW = 50;
     const int CPU_CANNY_HIGH = 150;
 
-    // GPU: your simplified hysteresis, needs lower thresholds
+    // GPU: simplified hysteresis, needs lower thresholds
     const uchar GPU_LOW_T = 20;
     const uchar GPU_HIGH_T = 80;
 
@@ -217,7 +217,7 @@ int main() {
     cv::Mat cpuLanes = extractLaneLinesFromEdges(cpuEdges, frame, 40, 40, 150);
     cv::imwrite("cpu_lane_detection.png", cpuLanes);
 
-    // ---------------- GPU edges (your custom pipeline) ----------------
+    // ---------------- GPU edges (custom pipeline) ----------------
     float h_kernel[25] = {
         2, 4, 5, 4, 2,
         4, 9, 12, 9, 4,
