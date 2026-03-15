@@ -4,10 +4,6 @@
 #include <chrono>
 #include <cmath>
 
-
-// How to compile and run:
-// nvcc -std=c++14 -O3 cpu_vs_gpu.cu -o lane_lines `pkg-config --cflags --libs opencv4` && ./lane_lines
-
 #define BLOCK_SIZE 16
 
 // ---------------- GPU Kernels ----------------
@@ -166,25 +162,9 @@ static cv::Mat extractLaneLinesFromEdges(const cv::Mat& edges,
     return out;
 }
 
-static cv::Mat drawMaskOnOutput(const cv::Mat& image, const cv::Mat& mask) {
-    cv::Mat out = image.clone();
-
-    cv::Mat tint(image.size(), image.type(), cv::Scalar(0, 255, 0));
-    cv::Mat blended;
-    cv::addWeighted(image, 0.80, tint, 0.20, 0.0, blended);
-    blended.copyTo(out, mask);
-
-    cv::Mat maskCopy = mask.clone();
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(maskCopy, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-    cv::drawContours(out, contours, -1, cv::Scalar(0, 255, 255), 2);
-
-    return out;
-}
-
 // ---------------- Main ----------------
 int main() {
-    cv::Mat frame = cv::imread("road.png", cv::IMREAD_COLOR);
+    cv::Mat frame = cv::imread("solidWhiteCurve.jpg", cv::IMREAD_COLOR);
     if (frame.empty()) {
         std::cerr << "Image not found!\n";
         return -1;
@@ -235,8 +215,7 @@ int main() {
 
     // CPU Hough (stricter)
     cv::Mat cpuLanes = extractLaneLinesFromEdges(cpuEdges, frame, 40, 40, 150);
-    cv::Mat cpuLanesWithMask = drawMaskOnOutput(cpuLanes, roiMask);
-    cv::imwrite("cpu_lane_detection.png", cpuLanesWithMask);
+    cv::imwrite("cpu_lane_detection.png", cpuLanes);
 
     // ---------------- GPU edges (your custom pipeline) ----------------
     float h_kernel[25] = {
@@ -291,8 +270,7 @@ int main() {
 
     // GPU Hough (looser)
     cv::Mat gpuLanes = extractLaneLinesFromEdges(gpuEdgesDilated, frame, 25, 20, 200);
-    cv::Mat gpuLanesWithMask = drawMaskOnOutput(gpuLanes, roiMask);
-    cv::imwrite("gpu_lane_detection.png", gpuLanesWithMask);
+    cv::imwrite("gpu_lane_detection.png", gpuLanes);
 
     cv::imwrite("original.png", frame);
 
