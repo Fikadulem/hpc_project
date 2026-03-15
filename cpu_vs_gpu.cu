@@ -4,6 +4,10 @@
 #include <chrono>
 #include <cmath>
 
+
+// How to compile and run:
+// nvcc -std=c++14 -O3 cpu_vs_gpu.cu -o lane_lines `pkg-config --cflags --libs opencv4` && ./lane_lines
+
 #define BLOCK_SIZE 16
 
 // ---------------- GPU Kernels ----------------
@@ -111,7 +115,7 @@ static cv::Mat makeRoadRoiMask(cv::Size sz) {
     // Expand ROI to the left by reducing the left x-ratios
     std::vector<cv::Point> poly = {
         cv::Point(static_cast<int>(w * 0.00), h),                    // was 0.05
-        cv::Point(static_cast<int>(w * 0.35), static_cast<int>(h * 0.60)), // was 0.45
+        cv::Point(static_cast<int>(w * 0.15), static_cast<int>(h * 0.60)), // widened further to the left
         cv::Point(static_cast<int>(w * 0.55), static_cast<int>(h * 0.60)),
         cv::Point(static_cast<int>(w * 0.95), h),
     };
@@ -162,9 +166,25 @@ static cv::Mat extractLaneLinesFromEdges(const cv::Mat& edges,
     return out;
 }
 
+static cv::Mat drawMaskOnOutput(const cv::Mat& image, const cv::Mat& mask) {
+    cv::Mat out = image.clone();
+
+    cv::Mat tint(image.size(), image.type(), cv::Scalar(0, 255, 0));
+    cv::Mat blended;
+    cv::addWeighted(image, 0.80, tint, 0.20, 0.0, blended);
+    blended.copyTo(out, mask);
+
+    cv::Mat maskCopy = mask.clone();
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(maskCopy, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::drawContours(out, contours, -1, cv::Scalar(0, 255, 255), 2);
+
+    return out;
+}
+
 // ---------------- Main ----------------
 int main() {
-    cv::Mat frame = cv::imread("solidWhiteCurve.jpg", cv::IMREAD_COLOR);
+    cv::Mat frame = cv::imread("road.png", cv::IMREAD_COLOR);
     if (frame.empty()) {
         std::cerr << "Image not found!\n";
         return -1;
@@ -202,16 +222,21 @@ int main() {
 
     // ---------------- CPU edges ----------------
     cv::Mat cpuEdges;
+    auto t1 = std::chrono::high_resolution_clock::now();
     {
         cv::Mat blur;
         cv::GaussianBlur(imgGray, blur, cv::Size(5, 5), 1.2);
         cv::Canny(blur, cpuEdges, CPU_CANNY_LOW, CPU_CANNY_HIGH);
     }
+    auto t2 = std::chrono::high_resolution_clock::now();
+    double cpu_time = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    std::cout << "CPU edge pipeline time: " << cpu_time << " ms\n";
     cv::imwrite("cpu_edges.png", cpuEdges);
 
     // CPU Hough (stricter)
     cv::Mat cpuLanes = extractLaneLinesFromEdges(cpuEdges, frame, 40, 40, 150);
-    cv::imwrite("cpu_lane_detection.png", cpuLanes);
+    cv::Mat cpuLanesWithMask = drawMaskOnOutput(cpuLanes, roiMask);
+    cv::imwrite("cpu_lane_detection.png", cpuLanesWithMask);
 
     // ---------------- GPU edges (your custom pipeline) ----------------
     float h_kernel[25] = {
@@ -248,6 +273,9 @@ int main() {
 
     double gpu_time = std::chrono::duration<double, std::milli>(t4 - t3).count();
     std::cout << "GPU edge pipeline time: " << gpu_time << " ms\n";
+    if (gpu_time > 0.0) {
+        std::cout << "Edge speedup (CPU/GPU): " << (cpu_time / gpu_time) << "x\n";
+    }
 
     cv::Mat gpuEdges(height, width, CV_8UC1);
     cudaMemcpy(gpuEdges.data, d_nms, imgSize, cudaMemcpyDeviceToHost);
@@ -263,7 +291,8 @@ int main() {
 
     // GPU Hough (looser)
     cv::Mat gpuLanes = extractLaneLinesFromEdges(gpuEdgesDilated, frame, 25, 20, 200);
-    cv::imwrite("gpu_lane_detection.png", gpuLanes);
+    cv::Mat gpuLanesWithMask = drawMaskOnOutput(gpuLanes, roiMask);
+    cv::imwrite("gpu_lane_detection.png", gpuLanesWithMask);
 
     cv::imwrite("original.png", frame);
 
