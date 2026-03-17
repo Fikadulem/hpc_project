@@ -199,9 +199,10 @@ static cv::Mat extractLaneLinesFromEdges(const cv::Mat& edges, const cv::Mat& or
 // Main — runs all three pipelines: CPU, Naive GPU, Optimized GPU
 // ================================================================
 
-int main() {
-    cv::Mat frame = cv::imread("solidWhiteCurve.jpg", cv::IMREAD_COLOR);
-    if (frame.empty()) { std::cerr << "Image not found!\n"; return -1; }
+int main(int argc, char** argv) {
+    const std::string inputPath = (argc >= 2) ? argv[1] : "solidWhiteCurve.jpg";
+    cv::Mat frame = cv::imread(inputPath, cv::IMREAD_COLOR);
+    if (frame.empty()) { std::cerr << "Image not found: " << inputPath << "\n"; return -1; }
 
     // Preprocessing (shared)
     cv::Mat roiMask = makeRoadRoiMask(frame.size());
