@@ -79,77 +79,193 @@ __global__ void hysteresisNaive(unsigned char* edges, int width, int height,
 
 // ================================================================
 // OPTIMIZED GPU KERNELS
-// Uses __constant__ memory for Gaussian kernel.
-// TODO (@CyberKnight): Add shared memory tiling for blur,
-// coalesced access patterns, etc.
+// 1) Gaussian Blur: Use __constant__ memory for kernel, shared memory tiling, and manual unrolling.
+// 2) Sobel Gradient: Use register blocking to fetch neighbors once, and manual unrolling for math.
+// 3) Non-Max Suppression: Quantize angles to 4 directions and use predication instead of if/else.
+// 4) Hysteresis: Use predication to eliminate branches.
 // ================================================================
 
-__constant__ float d_kernel[25]; // 5x5 Gaussian in constant memory
+#define TILE_SIZE 16
+#define KERNEL_RADIUS 2
+#define SH_DIM (TILE_SIZE + 2 * KERNEL_RADIUS)
 
+__constant__ float d_kernel[25];
+
+// Optimized Gaussian Blur with Shared Memory Tiling and Manual Unrolling
 __global__ void gaussianBlurGPU(const unsigned char* input, unsigned char* output,
-                                int width, int height) {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x < 2 || y < 2 || x >= width - 2 || y >= height - 2) return;
+    int width, int height) {
+    // 1. Shared memory for the tile plus a 2-pixel "halo" on all sides
+    __shared__ unsigned char sh_tile[SH_DIM][SH_DIM];
 
-    float sum = 0.0f;
-    for (int ky = -2; ky <= 2; ky++) {
-        for (int kx = -2; kx <= 2; kx++) {
-            sum += input[(y + ky) * width + (x + kx)] * d_kernel[(ky + 2) * 5 + (kx + 2)];
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int row = blockIdx.y * TILE_SIZE + ty;
+    int col = blockIdx.x * TILE_SIZE + tx;
+
+    // 2. Collaborative Loading into Shared Memory
+    for (int i = ty; i < SH_DIM; i += TILE_SIZE) {
+        for (int j = tx; j < SH_DIM; j += TILE_SIZE) {
+            int input_row = (int)(blockIdx.y * TILE_SIZE) + i - KERNEL_RADIUS;
+            int input_col = (int)(blockIdx.x * TILE_SIZE) + j - KERNEL_RADIUS;
+
+            if (input_row >= 0 && input_row < height && input_col >= 0 && input_col < width)
+                sh_tile[i][j] = input[input_row * width + input_col];
+            else
+                sh_tile[i][j] = 0;
         }
     }
-    output[y * width + x] = static_cast<unsigned char>(sum);
+    __syncthreads();
+
+    // 3. Compute the Blur with Manual Unrolling
+    if (row < height && col < width) {
+        float sum = 0.0f;
+
+        // Row 0
+        sum += (float)sh_tile[ty + 0][tx + 0] * d_kernel[0];
+        sum += (float)sh_tile[ty + 0][tx + 1] * d_kernel[1];
+        sum += (float)sh_tile[ty + 0][tx + 2] * d_kernel[2];
+        sum += (float)sh_tile[ty + 0][tx + 3] * d_kernel[3];
+        sum += (float)sh_tile[ty + 0][tx + 4] * d_kernel[4];
+
+        // Row 1
+        sum += (float)sh_tile[ty + 1][tx + 0] * d_kernel[5];
+        sum += (float)sh_tile[ty + 1][tx + 1] * d_kernel[6];
+        sum += (float)sh_tile[ty + 1][tx + 2] * d_kernel[7];
+        sum += (float)sh_tile[ty + 1][tx + 3] * d_kernel[8];
+        sum += (float)sh_tile[ty + 1][tx + 4] * d_kernel[9];
+
+        // Row 2
+        sum += (float)sh_tile[ty + 2][tx + 0] * d_kernel[10];
+        sum += (float)sh_tile[ty + 2][tx + 1] * d_kernel[11];
+        sum += (float)sh_tile[ty + 2][tx + 2] * d_kernel[12];
+        sum += (float)sh_tile[ty + 2][tx + 3] * d_kernel[13];
+        sum += (float)sh_tile[ty + 2][tx + 4] * d_kernel[14];
+
+        // Row 3
+        sum += (float)sh_tile[ty + 3][tx + 0] * d_kernel[15];
+        sum += (float)sh_tile[ty + 3][tx + 1] * d_kernel[16];
+        sum += (float)sh_tile[ty + 3][tx + 2] * d_kernel[17];
+        sum += (float)sh_tile[ty + 3][tx + 3] * d_kernel[18];
+        sum += (float)sh_tile[ty + 3][tx + 4] * d_kernel[19];
+
+        // Row 4
+        sum += (float)sh_tile[ty + 4][tx + 0] * d_kernel[20];
+        sum += (float)sh_tile[ty + 4][tx + 1] * d_kernel[21];
+        sum += (float)sh_tile[ty + 4][tx + 2] * d_kernel[22];
+        sum += (float)sh_tile[ty + 4][tx + 3] * d_kernel[23];
+        sum += (float)sh_tile[ty + 4][tx + 4] * d_kernel[24];
+
+        output[row * width + col] = static_cast<unsigned char>(sum);
+    }
 }
 
+// Optimized Sobel Gradient with Register Blocking and Manual Unrolling
 __global__ void sobelGradientGPU(const unsigned char* input, float* grad, float* angle,
-                                 int width, int height) {
+    int width, int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Boundary check for 3x3 kernel
     if (x < 1 || y < 1 || x >= width - 1 || y >= height - 1) return;
 
-    int Gx = -input[(y-1)*width+(x-1)] - 2*input[y*width+(x-1)] - input[(y+1)*width+(x-1)]
-             +input[(y-1)*width+(x+1)] + 2*input[y*width+(x+1)] + input[(y+1)*width+(x+1)];
-    int Gy = -input[(y-1)*width+(x-1)] - 2*input[(y-1)*width+x] - input[(y-1)*width+(x+1)]
-             +input[(y+1)*width+(x-1)] + 2*input[(y+1)*width+x] + input[(y+1)*width+(x+1)];
+    // 1. Fetch each neighbor exactly ONCE and store in registers
+    // This reduces global memory transactions significantly
+    float s00 = static_cast<float>(input[(y - 1) * width + (x - 1)]);
+    float s01 = static_cast<float>(input[(y - 1) * width + x]);
+    float s02 = static_cast<float>(input[(y - 1) * width + (x + 1)]);
 
-    float fx = static_cast<float>(Gx);
-    float fy = static_cast<float>(Gy);
-    grad[y * width + x]  = sqrtf(fx * fx + fy * fy);
-    angle[y * width + x] = atan2f(fy, fx);
+    float s10 = static_cast<float>(input[y * width + (x - 1)]);
+    // s11 (center) is not used in Sobel
+    float s12 = static_cast<float>(input[y * width + (x + 1)]);
+
+    float s20 = static_cast<float>(input[(y + 1) * width + (x - 1)]);
+    float s21 = static_cast<float>(input[(y + 1) * width + x]);
+    float s22 = static_cast<float>(input[(y + 1) * width + (x + 1)]);
+
+    // 2. Perform math using the registers
+    // Gx = sum of right column - sum of left column (with weights)
+    float fx = -s00 - 2.0f * s10 - s20 + s02 + 2.0f * s12 + s22;
+
+    // Gy = sum of bottom row - sum of top row (with weights)
+    float fy = -s00 - 2.0f * s01 - s02 + s20 + 2.0f * s21 + s22;
+
+    // 3. Store results
+    int idx = y * width + x;
+    grad[idx] = sqrtf(fx * fx + fy * fy);
+    angle[idx] = atan2f(fy, fx);
 }
 
+// Optimized Non-Max Suppression with Direction Quantization and Predication
 __global__ void nonMaxSuppressionGPU(const float* grad, const float* angle,
-                                     unsigned char* output, int width, int height) {
+    unsigned char* output, int width, int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
+
     if (x < 1 || y < 1 || x >= width - 1 || y >= height - 1) return;
 
-    float a = angle[y * width + x];
-    float g = grad[y * width + x];
+    int idx = y * width + x;
+    float a = angle[idx];
+    float g = grad[idx];
+
+    // 1. Map the continuous angle (-PI to PI) into 4 discrete directions (0, 1, 2, 3)
+    // We add PI/8 to shift the ranges so that 0 is "centered" around 0 degrees.
+    // We use fabsf because symmetry (0 deg is same as 180 deg for NMS)
+    float shifted_angle = fabsf(a) + (3.14159265f / 8.0f);
+    if (shifted_angle > 3.14159265f) shifted_angle -= 3.14159265f;
+
+    // Map to 0 (0°), 1 (45°), 2 (90°), 3 (135°)
+    int dir = static_cast<int>(shifted_angle / (3.14159265f / 4.0f)) % 4;
+
     float q = 0.0f, r = 0.0f;
 
-    if ((a >= -M_PI/8 && a <= M_PI/8) || (a <= -7*M_PI/8) || (a >= 7*M_PI/8)) {
-        q = grad[y*width+(x+1)]; r = grad[y*width+(x-1)];
-    } else if ((a >= M_PI/8 && a < 3*M_PI/8) || (a <= -5*M_PI/8 && a > -7*M_PI/8)) {
-        q = grad[(y+1)*width+(x-1)]; r = grad[(y-1)*width+(x+1)];
-    } else if ((a >= 3*M_PI/8 && a <= 5*M_PI/8) || (a <= -3*M_PI/8 && a >= -5*M_PI/8)) {
-        q = grad[(y+1)*width+x]; r = grad[(y-1)*width+x];
-    } else {
-        q = grad[(y-1)*width+(x-1)]; r = grad[(y+1)*width+(x+1)];
+    // 2. Simplified logic using the direction index
+    // This is much easier for the GPU to schedule than the original if/else blocks
+    switch (dir) {
+    case 0: // Horizontal (0°)
+        q = grad[y * width + (x + 1)];
+        r = grad[y * width + (x - 1)];
+        break;
+    case 1: // Diagonal (45°)
+        q = grad[(y + 1) * width + (x - 1)];
+        r = grad[(y - 1) * width + (x + 1)];
+        break;
+    case 2: // Vertical (90°)
+        q = grad[(y + 1) * width + x];
+        r = grad[(y - 1) * width + x];
+        break;
+    case 3: // Diagonal (135°)
+        q = grad[(y - 1) * width + (x - 1)];
+        r = grad[(y + 1) * width + (x + 1)];
+        break;
     }
-    output[y * width + x] = (g >= q && g >= r) ? static_cast<unsigned char>(fminf(g, 255.0f)) : 0;
+
+    output[idx] = (g >= q && g >= r) ? static_cast<unsigned char>(fminf(g, 255.0f)) : 0;
 }
 
+// Optimized Hysteresis with Predication (No Branches)
 __global__ void hysteresisGPU(unsigned char* edges, int width, int height,
-                              unsigned char low, unsigned char high) {
+    unsigned char low, unsigned char high) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
+
     if (x >= width || y >= height) return;
 
-    unsigned char val = edges[y * width + x];
-    if (val >= high)     edges[y * width + x] = 255;
-    else if (val < low)  edges[y * width + x] = 0;
+    int idx = y * width + x;
+    unsigned char val = edges[idx];
+
+    // Predicated Logic: No 'if' or 'else' blocks
+    // The compiler turns these into 'sel' (select) or predicated 'mov' instructions
+    unsigned char is_strong = (val >= high);
+    unsigned char is_weak = (val >= low);
+
+    // If strong (>= high), result is 255. 
+    // If not strong but weak (>= low), result is 127 (or val).
+    // If neither, result is 0.
+    unsigned char result = is_strong ? 255 : (is_weak ? 127 : 0);
+
+    edges[idx] = result;
 }
+
 
 // ================================================================
 // Helper functions (shared by all pipelines)
